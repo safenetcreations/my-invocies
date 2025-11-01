@@ -15,6 +15,42 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Check Required Secrets
+        run: |
+          echo "🔍 Checking required secrets..."
+          MISSING_SECRETS=0
+
+          if [ -z "${{ secrets.VITE_FIREBASE_API_KEY }}" ]; then
+            echo "❌ Missing: VITE_FIREBASE_API_KEY"
+            MISSING_SECRETS=1
+          fi
+
+          if [ -z "${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}" ]; then
+            echo "❌ Missing: VITE_FIREBASE_AUTH_DOMAIN"
+            MISSING_SECRETS=1
+          fi
+
+          if [ -z "${{ secrets.VITE_FIREBASE_PROJECT_ID }}" ]; then
+            echo "❌ Missing: VITE_FIREBASE_PROJECT_ID"
+            MISSING_SECRETS=1
+          fi
+
+          if [ -z "${{ secrets.FIREBASE_TOKEN }}" ] && [ -z "${{ secrets.FIREBASE_SERVICE_ACCOUNT }}" ]; then
+            echo "❌ Missing: FIREBASE_TOKEN or FIREBASE_SERVICE_ACCOUNT (need at least one)"
+            MISSING_SECRETS=1
+          fi
+
+          if [ $MISSING_SECRETS -eq 1 ]; then
+            echo ""
+            echo "📖 Please add missing secrets at:"
+            echo "   https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo ""
+            echo "📄 See DEPLOYMENT_ERROR_FIX.md for the complete list of required secrets"
+            exit 1
+          fi
+
+          echo "✅ All required secrets found!"
+
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
