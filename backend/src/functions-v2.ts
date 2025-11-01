@@ -268,6 +268,58 @@ app.delete(
 );
 
 // ============================================================================
+// BRANDING ROUTES
+// ============================================================================
+
+// Configure multer for file uploads (memory storage)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB max
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/svg+xml', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only JPG, PNG, SVG, and WebP are allowed.'));
+    }
+  },
+});
+
+// Upload logo
+app.post(
+  '/api/tenants/:tenantId/branding/logo',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  upload.single('logo'),
+  uploadLogo
+);
+
+// Get branding
+app.get(
+  '/api/tenants/:tenantId/branding',
+  ...protectedRoute,
+  getBranding
+);
+
+// Update colors manually
+app.put(
+  '/api/tenants/:tenantId/branding/colors',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  updateBrandingColors
+);
+
+// Re-extract colors from logo
+app.post(
+  '/api/tenants/:tenantId/branding/re-extract',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  reExtractColors
+);
+
+// ============================================================================
 // CLIENT ROUTES
 // ============================================================================
 
@@ -706,3 +758,10 @@ export const sendInvoiceReminders = functions.scheduler.onSchedule(
     console.log('Invoice reminder job completed');
   }
 );
+
+// ============================================================================
+// BRANDING FUNCTIONS (Storage Trigger)
+// ============================================================================
+
+// Export branding functions
+export { onLogoUploaded } from './functions-branding';
