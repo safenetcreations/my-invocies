@@ -1,0 +1,321 @@
+rules_version = '2';
+
+// ============================================================================
+// Firebase Storage Security Rules
+// Multi-Tenant Invoice Management System
+// ============================================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ============================================================================
+    // HELPER FUNCTIONS
+    // ============================================================================
+
+    /**
+     * Check if user is authenticated
+     */
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    /**
+     * Get user ID
+     */
+    function userId() {
+      return request.auth.uid;
+    }
+
+    /**
+     * Get active tenant ID from custom claims
+     */
+    function activeTenantId() {
+      return request.auth.token.tenantId;
+    }
+
+    /**
+     * Get user's role in active tenant
+     */
+    function userRole() {
+      return request.auth.token.role;
+    }
+
+    /**
+     * Check if user has specific role
+     */
+    function hasRole(role) {
+      return isAuthenticated() && userRole() == role;
+    }
+
+    /**
+     * Check if user is owner or admin
+     */
+    function isAdmin() {
+      return hasRole('owner') || hasRole('admin');
+    }
+
+    /**
+     * Check if user has specific permission
+     */
+    function hasPermission(permission) {
+      return isAuthenticated()
+        && 'permissions' in request.auth.token
+        && permission in request.auth.token.permissions;
+    }
+
+    /**
+     * Validate file size (max 10MB for images, 20MB for PDFs)
+     */
+    function isValidFileSize(maxSize) {
+      return request.resource.size <= maxSize;
+    }
+
+    /**
+     * Validate image file type
+     */
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    /**
+     * Validate PDF file type
+     */
+    function isPDF() {
+      return request.resource.contentType == 'application/pdf';
+    }
+
+    /**
+     * Validate logo file types (image or SVG)
+     */
+    function isValidLogoType() {
+      return request.resource.contentType.matches('image/(jpeg|jpg|png|svg\\+xml|webp)');
+    }
+
+    // ============================================================================
+    // TENANT LOGOS
+    // Path: /logos/{tenantId}/{filename}
+    // ============================================================================
+    match /logos/{tenantId}/{filename} {
+      // Read: Anyone (for public invoice viewing)
+      allow read: if true;
+
+      // Create/Update: Only tenant members with settings:update permission
+      allow write: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && hasPermission('settings:update')
+        && isValidLogoType()
+        && isValidFileSize(5 * 1024 * 1024); // 5MB max
+
+      // Delete: Only owner or admin
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && isAdmin();
+    }
+
+    // ============================================================================
+    // INVOICE PDFs
+    // Path: /invoices/{tenantId}/{invoiceId}.pdf
+    // ============================================================================
+    match /invoices/{tenantId}/{invoiceId}.pdf {
+      // Read: Tenant members with invoices:read permission OR public access
+      allow read: if true; // Public read for client viewing
+
+      // Create/Update: Only via Cloud Functions (backend generates PDFs)
+      allow write: if false;
+
+      // Delete: Admin only
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && isAdmin();
+    }
+
+    // ============================================================================
+    // INVOICE PDFs (Alternative path with year/month organization)
+    // Path: /invoices/{tenantId}/{year}/{month}/{invoiceId}.pdf
+    // ============================================================================
+    match /invoices/{tenantId}/{year}/{month}/{invoiceId}.pdf {
+      // Read: Public access for client viewing
+      allow read: if true;
+
+      // Create/Update: Only via Cloud Functions
+      allow write: if false;
+
+      // Delete: Admin only
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && isAdmin();
+    }
+
+    // ============================================================================
+    // PAYMENT RECEIPTS
+    // Path: /receipts/{tenantId}/{paymentId}.pdf
+    // ============================================================================
+    match /receipts/{tenantId}/{paymentId}.pdf {
+      // Read: Tenant members with payments:read permission OR public access
+      allow read: if true; // Public read for client viewing
+
+      // Create/Update: Only via Cloud Functions
+      allow write: if false;
+
+      // Delete: Admin only
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && isAdmin();
+    }
+
+    // ============================================================================
+    // TAX REPORT PDFs
+    // Path: /tax-reports/{tenantId}/{reportId}.pdf
+    // ============================================================================
+    match /tax-reports/{tenantId}/{reportId}.pdf {
+      // Read: Tenant members with reports:read permission
+      allow read: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && hasPermission('reports:read');
+
+      // Create/Update: Only via Cloud Functions
+      allow write: if false;
+
+      // Delete: Admin only
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && isAdmin();
+    }
+
+    // ============================================================================
+    // ATTACHMENTS (Invoice attachments, supporting documents)
+    // Path: /attachments/{tenantId}/{invoiceId}/{filename}
+    // ============================================================================
+    match /attachments/{tenantId}/{invoiceId}/{filename} {
+      // Read: Tenant members with invoices:read permission OR public access
+      allow read: if true; // Public read for clients
+
+      // Create/Update: Tenant members with invoices:create/update permission
+      allow write: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && (hasPermission('invoices:create') || hasPermission('invoices:update'))
+        && isValidFileSize(20 * 1024 * 1024); // 20MB max
+
+      // Delete: Admin or user who created the invoice
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && (isAdmin() || hasPermission('invoices:delete'));
+    }
+
+    // ============================================================================
+    // CLIENT DOCUMENTS (Contracts, agreements, etc.)
+    // Path: /clients/{tenantId}/{clientId}/{filename}
+    // ============================================================================
+    match /clients/{tenantId}/{clientId}/{filename} {
+      // Read: Tenant members with clients:read permission
+      allow read: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && hasPermission('clients:read');
+
+      // Create/Update: Tenant members with clients:update permission
+      allow write: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && hasPermission('clients:update')
+        && isValidFileSize(10 * 1024 * 1024); // 10MB max
+
+      // Delete: Admin or user with clients:delete permission
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && (isAdmin() || hasPermission('clients:delete'));
+    }
+
+    // ============================================================================
+    // EXPORTS (CSV, Excel exports)
+    // Path: /exports/{tenantId}/{filename}
+    // ============================================================================
+    match /exports/{tenantId}/{filename} {
+      // Read: Tenant members
+      allow read: if isAuthenticated()
+        && activeTenantId() == tenantId;
+
+      // Create/Update: Only via Cloud Functions
+      allow write: if false;
+
+      // Delete: Automatic (files auto-expire after 24 hours via Cloud Function)
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && isAdmin();
+    }
+
+    // ============================================================================
+    // BACKUPS (Tenant data backups)
+    // Path: /backups/{tenantId}/{filename}
+    // ============================================================================
+    match /backups/{tenantId}/{filename} {
+      // Read: Owner only
+      allow read: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && hasRole('owner');
+
+      // Create/Update: Only via Cloud Functions
+      allow write: if false;
+
+      // Delete: Owner only
+      allow delete: if isAuthenticated()
+        && activeTenantId() == tenantId
+        && hasRole('owner');
+    }
+
+    // ============================================================================
+    // USER PROFILE PICTURES
+    // Path: /users/{userId}/profile.{ext}
+    // ============================================================================
+    match /users/{userId}/{filename} {
+      // Read: Anyone (for user avatars in UI)
+      allow read: if true;
+
+      // Create/Update: Only the user themselves
+      allow write: if isAuthenticated()
+        && userId() == userId
+        && isImage()
+        && isValidFileSize(2 * 1024 * 1024); // 2MB max
+
+      // Delete: Only the user themselves
+      allow delete: if isAuthenticated()
+        && userId() == userId;
+    }
+
+    // ============================================================================
+    // TEMPORARY UPLOADS (For processing before moving to final location)
+    // Path: /temp/{userId}/{filename}
+    // ============================================================================
+    match /temp/{userId}/{filename} {
+      // Read: Only the user who uploaded
+      allow read: if isAuthenticated()
+        && userId() == userId;
+
+      // Create/Update: Only the user themselves
+      allow write: if isAuthenticated()
+        && userId() == userId
+        && isValidFileSize(20 * 1024 * 1024); // 20MB max
+
+      // Delete: Only the user themselves or auto-cleanup
+      allow delete: if isAuthenticated()
+        && userId() == userId;
+    }
+
+    // ============================================================================
+    // PUBLIC ASSETS (Shared resources, templates, etc.)
+    // Path: /public/{filename}
+    // ============================================================================
+    match /public/{filename} {
+      // Read: Anyone
+      allow read: if true;
+
+      // Create/Update/Delete: Only via Cloud Functions (admin operations)
+      allow write: if false;
+    }
+
+    // ============================================================================
+    // DEFAULT DENY ALL
+    // ============================================================================
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

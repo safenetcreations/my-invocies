@@ -33,12 +33,47 @@ import {
 } from './services/multiTenantFirestore';
 import { authService } from './services/authService';
 import { brandingService } from './services/brandingService';
+import { taxService } from './services/taxService';
+import { pdfGenerationService } from './services/pdfGenerationService';
+import { taxReportingService } from './services/taxReportingService';
 import {
   uploadLogo,
   updateBrandingColors,
   getBranding,
   reExtractColors,
 } from './functions-branding';
+import {
+  sendInvoiceEmail,
+  sendInvoiceWhatsApp,
+  sendPaymentReminder,
+  getCommunicationHistory,
+  configureWhatsApp,
+  testWhatsAppConnection,
+  verifyWhatsAppWebhook,
+  handleWhatsAppWebhook,
+  configureEmail,
+  getGmailAuthUrl,
+  handleGmailCallback,
+  testEmailConnection,
+  trackEmailOpen,
+  trackEmailClick,
+} from './functions-communication';
+import {
+  generateInvoiceNumber,
+  reserveInvoiceNumber,
+  applyLateFee,
+  updateInvoiceStatus,
+  bulkDeleteInvoices,
+  bulkUpdateInvoiceStatus,
+} from './functions-invoicing';
+import {
+  configurePayHere,
+  createPaymentLink,
+  handlePayHereNotify,
+  recordPayment,
+  getPaymentHistory,
+  testPayHereConnection,
+} from './functions-payment';
 
 // Import middleware
 import {
@@ -625,10 +660,188 @@ app.patch(
 );
 
 // ============================================================================
+// INVOICING OPERATIONS
+// ============================================================================
+
+// Generate next invoice number
+app.post(
+  '/api/invoices/generate-number',
+  ...protectedRoute,
+  requirePermission('invoices:create'),
+  generateInvoiceNumber
+);
+
+// Reserve invoice number (validate availability)
+app.post(
+  '/api/invoices/reserve-number',
+  ...protectedRoute,
+  requirePermission('invoices:create'),
+  reserveInvoiceNumber
+);
+
+// Apply late fee to invoice
+app.post(
+  '/api/invoices/:invoiceId/late-fee',
+  ...protectedRoute,
+  requirePermission('invoices:update'),
+  applyLateFee
+);
+
+// Update invoice status based on due date
+app.post(
+  '/api/invoices/:invoiceId/update-status',
+  ...protectedRoute,
+  requirePermission('invoices:update'),
+  updateInvoiceStatus
+);
+
+// Bulk delete invoices
+app.post(
+  '/api/invoices/bulk-delete',
+  ...protectedRoute,
+  requirePermission('invoices:delete'),
+  bulkDeleteInvoices
+);
+
+// Bulk update invoice status
+app.post(
+  '/api/invoices/bulk-update-status',
+  ...protectedRoute,
+  requirePermission('invoices:update'),
+  bulkUpdateInvoiceStatus
+);
+
+// ============================================================================
+// TAX CALCULATION & PDF ROUTES
+// ============================================================================
+
+// Calculate taxes for invoice
+app.post(
+  '/api/invoices/calculate-taxes',
+  ...protectedRoute,
+  async (req: AuthRequest, res) => {
+    try {
+      const { lineItems, clientId, dateOfSupply, invoiceType } = req.body;
+
+      const tenant = await tenantService.get<Tenant>(Collections.TENANTS, req.tenantId!);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      let client;
+      if (clientId) {
+        client = await clientService.get<Client>(Collections.CLIENTS, clientId);
+      }
+
+      const taxCalculation = taxService.calculateInvoiceTaxes({
+        tenant,
+        client,
+        lineItems,
+        dateOfSupply: dateOfSupply ? new Date(dateOfSupply) : new Date(),
+        invoiceType: invoiceType || 'tax_invoice',
+      });
+
+      res.json(taxCalculation);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Validate invoice for tax compliance
+app.post(
+  '/api/invoices/validate',
+  ...protectedRoute,
+  async (req: AuthRequest, res) => {
+    try {
+      const { invoice, clientId } = req.body;
+
+      const tenant = await tenantService.get<Tenant>(Collections.TENANTS, req.tenantId!);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      let client;
+      if (clientId) {
+        client = await clientService.get<Client>(Collections.CLIENTS, clientId);
+      }
+
+      const validation = taxService.validateTaxInvoice(invoice, tenant, client);
+
+      res.json(validation);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Generate PDF for invoice
+app.post(
+  '/api/invoices/:id/generate-pdf',
+  ...protectedRoute,
+  requirePermission('invoices:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const invoice = await invoiceService.get<Invoice>(Collections.INVOICES, req.params.id);
+
+      if (!invoice || invoice.tenantId !== req.tenantId) {
+        return res.status(404).json({ error: 'Invoice not found' });
+      }
+
+      const tenant = await tenantService.get<Tenant>(Collections.TENANTS, req.tenantId!);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const pdfUrl = await pdfGenerationService.generateInvoicePDF(invoice, tenant);
+
+      // Update invoice with PDF URL
+      await invoiceService.update<Invoice>(Collections.INVOICES, invoice.id, {
+        pdfUrl,
+      } as any);
+
+      res.json({ pdfUrl });
+    } catch (error: any) {
+      console.error('Error generating PDF:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Get invoice preview HTML
+app.get(
+  '/api/invoices/:id/preview',
+  ...protectedRoute,
+  requirePermission('invoices:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const invoice = await invoiceService.get<Invoice>(Collections.INVOICES, req.params.id);
+
+      if (!invoice || invoice.tenantId !== req.tenantId) {
+        return res.status(404).json({ error: 'Invoice not found' });
+      }
+
+      const tenant = await tenantService.get<Tenant>(Collections.TENANTS, req.tenantId!);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const html = pdfGenerationService.generateInvoicePreview(invoice, tenant);
+
+      res.set('Content-Type', 'text/html');
+      res.send(html);
+    } catch (error: any) {
+      console.error('Error generating preview:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ============================================================================
 // PAYMENT ROUTES
 // ============================================================================
 
-// Record payment
+// Record payment (legacy route - keeping for compatibility)
 app.post(
   '/api/payments',
   ...protectedRoute,
@@ -649,27 +862,376 @@ app.post(
   }
 );
 
+// Record manual payment (new route with more features)
+app.post(
+  '/api/invoices/:invoiceId/payments',
+  ...protectedRoute,
+  requirePermission('payments:create'),
+  recordPayment
+);
+
 // Get payments for invoice
 app.get(
   '/api/invoices/:invoiceId/payments',
   ...protectedRoute,
   requirePermission('payments:read'),
+  getPaymentHistory
+);
+
+// ============================================================================
+// PAYHERE PAYMENT GATEWAY ROUTES
+// ============================================================================
+
+// Configure PayHere
+app.post(
+  '/api/integrations/payhere/configure',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  configurePayHere
+);
+
+// Test PayHere connection
+app.post(
+  '/api/integrations/payhere/test',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  testPayHereConnection
+);
+
+// Create payment link for invoice
+app.post(
+  '/api/invoices/:invoiceId/payment-link',
+  ...protectedRoute,
+  requirePermission('invoices:read'),
+  createPaymentLink
+);
+
+// PayHere payment notification webhook (public - no auth)
+app.post('/api/webhooks/payhere', handlePayHereNotify);
+
+// ============================================================================
+// TAX REPORTING ROUTES
+// ============================================================================
+
+// Generate VAT Return
+app.post(
+  '/api/tax-reports/vat-return',
+  ...protectedRoute,
+  requirePermission('reports:read'),
   async (req: AuthRequest, res) => {
     try {
-      const payments = await tenantService.list<Payment>(Collections.PAYMENTS, {
-        filters: [
-          { field: 'tenantId', operator: '==', value: req.tenantId! },
-          { field: 'invoiceId', operator: '==', value: req.params.invoiceId },
-        ],
-        orderBy: { field: 'paymentDate', direction: 'desc' },
-      });
+      const { startDate, endDate } = req.body;
 
-      res.json({ payments });
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate and endDate are required' });
+      }
+
+      const vatReturn = await taxReportingService.generateVATReturn(
+        req.tenantId!,
+        new Date(startDate),
+        new Date(endDate)
+      );
+
+      res.json({ vatReturn });
+    } catch (error: any) {
+      console.error('Error generating VAT return:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Generate VAT Return PDF
+app.post(
+  '/api/tax-reports/vat-return/pdf',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const { startDate, endDate } = req.body;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate and endDate are required' });
+      }
+
+      const tenant = await tenantService.get<Tenant>(Collections.TENANTS, req.tenantId!);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const vatReturn = await taxReportingService.generateVATReturn(
+        req.tenantId!,
+        new Date(startDate),
+        new Date(endDate)
+      );
+
+      const pdfUrl = await taxReportingService.generateVATReturnPDF(vatReturn, tenant);
+
+      res.json({ pdfUrl, vatReturn });
+    } catch (error: any) {
+      console.error('Error generating VAT return PDF:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Generate SVAT Summary
+app.post(
+  '/api/tax-reports/svat-summary',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const { startDate, endDate } = req.body;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate and endDate are required' });
+      }
+
+      const svatSummary = await taxReportingService.generateSVATSummary(
+        req.tenantId!,
+        new Date(startDate),
+        new Date(endDate)
+      );
+
+      res.json({ svatSummary });
+    } catch (error: any) {
+      console.error('Error generating SVAT summary:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Generate Sales Register
+app.post(
+  '/api/tax-reports/sales-register',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const { startDate, endDate } = req.body;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate and endDate are required' });
+      }
+
+      const salesRegister = await taxReportingService.generateSalesRegister(
+        req.tenantId!,
+        new Date(startDate),
+        new Date(endDate)
+      );
+
+      res.json({ salesRegister });
+    } catch (error: any) {
+      console.error('Error generating sales register:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Export Sales Register to CSV
+app.post(
+  '/api/tax-reports/sales-register/export',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const { startDate, endDate } = req.body;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate and endDate are required' });
+      }
+
+      const salesRegister = await taxReportingService.generateSalesRegister(
+        req.tenantId!,
+        new Date(startDate),
+        new Date(endDate)
+      );
+
+      const csv = await taxReportingService.exportSalesRegisterToCSV(salesRegister);
+
+      res.set('Content-Type', 'text/csv');
+      res.set('Content-Disposition', `attachment; filename="sales-register-${startDate}-${endDate}.csv"`);
+      res.send(csv);
+    } catch (error: any) {
+      console.error('Error exporting sales register:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Generate Comprehensive Tax Report
+app.post(
+  '/api/tax-reports/comprehensive',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const { startDate, endDate } = req.body;
+
+      if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate and endDate are required' });
+      }
+
+      const report = await taxReportingService.generateComprehensiveTaxReport(
+        req.tenantId!,
+        new Date(startDate),
+        new Date(endDate)
+      );
+
+      res.json(report);
+    } catch (error: any) {
+      console.error('Error generating comprehensive report:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// Get VAT filing period (helper endpoint)
+app.get(
+  '/api/tax-reports/vat-period/:year/:quarter',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const year = parseInt(req.params.year);
+      const quarter = parseInt(req.params.quarter);
+
+      if (isNaN(year) || isNaN(quarter) || quarter < 1 || quarter > 4) {
+        return res.status(400).json({ error: 'Invalid year or quarter' });
+      }
+
+      const period = taxReportingService.getVATFilingPeriod(year, quarter);
+
+      res.json(period);
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   }
 );
+
+// Check if VAT return is due
+app.get(
+  '/api/tax-reports/vat-due-check',
+  ...protectedRoute,
+  requirePermission('reports:read'),
+  async (req: AuthRequest, res) => {
+    try {
+      const tenant = await tenantService.get<Tenant>(Collections.TENANTS, req.tenantId!);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant not found' });
+      }
+
+      const isDue = taxReportingService.isVATReturnDue(tenant);
+
+      res.json({ isDue });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ============================================================================
+// COMMUNICATION ROUTES
+// ============================================================================
+
+// Send invoice via email
+app.post(
+  '/api/communication/send/email',
+  ...protectedRoute,
+  requirePermission('invoices:update'),
+  sendInvoiceEmail
+);
+
+// Send invoice via WhatsApp
+app.post(
+  '/api/communication/send/whatsapp',
+  ...protectedRoute,
+  requirePermission('invoices:update'),
+  sendInvoiceWhatsApp
+);
+
+// Send payment reminder
+app.post(
+  '/api/communication/reminder',
+  ...protectedRoute,
+  requirePermission('invoices:update'),
+  sendPaymentReminder
+);
+
+// Get communication history for invoice
+app.get(
+  '/api/communication/history/:invoiceId',
+  ...protectedRoute,
+  requirePermission('invoices:read'),
+  getCommunicationHistory
+);
+
+// ============================================================================
+// WHATSAPP INTEGRATION ROUTES
+// ============================================================================
+
+// Configure WhatsApp
+app.post(
+  '/api/integrations/whatsapp/configure',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  configureWhatsApp
+);
+
+// Test WhatsApp connection
+app.post(
+  '/api/integrations/whatsapp/test',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  testWhatsAppConnection
+);
+
+// WhatsApp webhook verification (GET)
+app.get('/api/webhooks/whatsapp', verifyWhatsAppWebhook);
+
+// WhatsApp webhook handler (POST)
+app.post('/api/webhooks/whatsapp', handleWhatsAppWebhook);
+
+// ============================================================================
+// EMAIL INTEGRATION ROUTES
+// ============================================================================
+
+// Configure email (SMTP)
+app.post(
+  '/api/integrations/email/configure',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  configureEmail
+);
+
+// Get Gmail OAuth URL
+app.get(
+  '/api/integrations/gmail/auth-url',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  getGmailAuthUrl
+);
+
+// Gmail OAuth callback (no auth required - handled by Google)
+app.get('/api/integrations/gmail/callback', handleGmailCallback);
+
+// Test email connection
+app.post(
+  '/api/integrations/email/test',
+  ...protectedRoute,
+  requirePermission('settings:update'),
+  testEmailConnection
+);
+
+// ============================================================================
+// TRACKING ROUTES (Public - no auth required)
+// ============================================================================
+
+// Track email open
+app.get('/api/track/open/:communicationLogId.png', trackEmailOpen);
+
+// Track email link click
+app.get('/api/track/click/:communicationLogId', trackEmailClick);
 
 // ============================================================================
 // EXPORT API AS CLOUD FUNCTION
@@ -765,3 +1327,17 @@ export const sendInvoiceReminders = functions.scheduler.onSchedule(
 
 // Export branding functions
 export { onLogoUploaded } from './functions-branding';
+
+// ============================================================================
+// COMMUNICATION FUNCTIONS (Scheduled)
+// ============================================================================
+
+// Export communication scheduled functions
+export { sendAutomatedReminders } from './functions-communication';
+
+// ============================================================================
+// INVOICING FUNCTIONS (Scheduled)
+// ============================================================================
+
+// Export invoicing scheduled functions
+export { applyLateFees, updateAllInvoiceStatuses } from './functions-invoicing';

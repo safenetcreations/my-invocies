@@ -419,7 +419,7 @@ export class TenantService extends MultiTenantFirestoreService {
 
 export class InvoiceService extends MultiTenantFirestoreService {
   /**
-   * Create invoice with automatic number generation
+   * Create invoice with automatic number generation and tax calculation
    */
   async createInvoice(
     data: Omit<Invoice, 'id' | 'invoiceNumber' | 'createdAt' | 'updatedAt'>

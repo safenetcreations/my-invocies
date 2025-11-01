@@ -222,13 +222,15 @@ service cloud.firestore {
     // ============================================================================
     // COMMUNICATION LOGS COLLECTION
     // ============================================================================
-    match /communicationLogs/{logId} {
+    match /communication_logs/{logId} {
       allow read: if isTenantMember(resource.data.tenantId) &&
                     hasPermission(resource.data.tenantId, 'invoices:read');
 
       allow create: if true; // Allow webhooks to create logs
 
-      allow update, delete: if false; // Logs are immutable
+      allow update: if true; // Allow webhooks to update status
+
+      allow delete: if isAdmin(resource.data.tenantId);
     }
 
     // ============================================================================
@@ -304,6 +306,44 @@ service cloud.firestore {
     match /publicInvoices/{invoiceId} {
       allow read: if true; // Public read for invoice viewing links
       allow write: if false; // Only backend can create public invoice views
+    }
+
+    // ============================================================================
+    // BRANDING COLLECTION
+    // ============================================================================
+    match /branding/{tenantId} {
+      allow read: if isTenantMember(tenantId);
+
+      allow create, update: if isTenantMember(tenantId) &&
+                              hasPermission(tenantId, 'settings:update');
+
+      allow delete: if isOwner(tenantId);
+    }
+
+    // ============================================================================
+    // TAX REPORTS COLLECTION
+    // ============================================================================
+    match /tax_reports/{reportId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'reports:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'reports:read');
+
+      allow update, delete: if false; // Tax reports are immutable once created
+    }
+
+    // ============================================================================
+    // ACTIVITY LOGS COLLECTION (Enhanced Audit Trail)
+    // ============================================================================
+    match /activity_logs/{logId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    isAdmin(resource.data.tenantId);
+
+      allow create: if true; // Backend creates activity logs
+
+      allow update, delete: if false; // Activity logs are immutable
     }
 
     // ============================================================================
