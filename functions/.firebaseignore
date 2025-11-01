@@ -1,0 +1,9 @@
+node_modules/
+*.log
+__tests__/
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+.git/
+.DS_Store

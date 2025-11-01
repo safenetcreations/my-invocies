@@ -1,0 +1,292 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  password  String
+  role      UserRole @default(USER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Multi-tenant relationships
+  businessUsers BusinessUser[]
+  
+  @@map("users")
+}
+
+model Business {
+  id              String  @id @default(cuid())
+  name            String
+  legalName       String
+  address         String
+  vatNumber       String?
+  tinNumber       String?
+  phone           String?
+  email           String?
+  website         String?
+  logoUrl         String?
+  primaryColor    String  @default("#2563eb")
+  defaultCurrency String  @default("LKR")
+  
+  // Invoice settings
+  invoicePrefix      String @default("INV")
+  invoiceSequence    Int    @default(0)
+  defaultTaxRate     Float  @default(0.15)
+  taxInclusive       Boolean @default(false)
+  defaultPaymentTerms String @default("Payment due within 30 days")
+  
+  // Settings JSON for flexible configuration
+  settings        Json?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relationships
+  businessUsers         BusinessUser[]
+  products             Product[]
+  contacts             Contact[]
+  invoices             Invoice[]
+  integrationCredentials IntegrationCredential[]
+  
+  @@map("businesses")
+}
+
+model BusinessUser {
+  id         String       @id @default(cuid())
+  businessId String
+  userId     String
+  role       BusinessRole @default(USER)
+  createdAt  DateTime     @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, userId])
+  @@map("business_users")
+}
+
+model Product {
+  id           String  @id @default(cuid())
+  businessId   String
+  sku          String?
+  name         String
+  description  String?
+  unitPrice    Float
+  taxRate      Float?
+  taxInclusive Boolean @default(false)
+  isActive     Boolean @default(true)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business  Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  lineItems LineItem[]
+
+  @@unique([businessId, sku])
+  @@map("products")
+}
+
+model Contact {
+  id            String  @id @default(cuid())
+  businessId    String
+  name          String
+  email         String?
+  phone         String?
+  vatNumber     String?
+  billingAddress String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@map("contacts")
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  businessId     String
+  contactId      String?
+  invoiceNumber  String
+  invoiceSequence Int
+  type           InvoiceType   @default(TAX_INVOICE)
+  status         InvoiceStatus @default(DRAFT)
+  
+  // Dates
+  dateIssued     DateTime
+  dateOfSupply   DateTime?
+  dueDate        DateTime?
+  
+  // Customer details (denormalized for audit trail)
+  customerName    String
+  customerEmail   String?
+  customerPhone   String?
+  customerVatNumber String?
+  customerAddress String?
+  
+  // Financial
+  currency       String  @default("LKR")
+  subtotal       Float
+  taxTotal       Float
+  total          Float
+  amountPaid     Float   @default(0)
+  
+  // Delivery
+  sentAt         DateTime?
+  sentVia        String[] // ['email', 'whatsapp']
+  
+  // Files
+  pdfUrl         String?
+  
+  notes          String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business       Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contact        Contact?        @relation(fields: [contactId], references: [id])
+  lineItems      LineItem[]
+  payments       Payment[]
+  trackingEvents TrackingEvent[]
+
+  @@unique([businessId, invoiceNumber])
+  @@map("invoices")
+}
+
+model LineItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  productId   String?
+  description String
+  quantity    Float
+  unitPrice   Float
+  taxRate     Float
+  taxAmount   Float
+  lineTotal   Float
+  sortOrder   Int     @default(0)
+
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id])
+
+  @@map("line_items")
+}
+
+model Payment {
+  id               String        @id @default(cuid())
+  invoiceId        String
+  amount           Float
+  currency         String        @default("LKR")
+  dateReceived     DateTime
+  paymentMethod    PaymentMethod
+  gatewayReference String?
+  notes            String?
+  
+  createdAt DateTime @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+model TrackingEvent {
+  id        String           @id @default(cuid())
+  invoiceId String
+  kind      TrackingEventKind
+  timestamp DateTime         @default(now())
+  metadata  Json?            // ip, user_agent, message_id, etc.
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, kind])
+  @@map("tracking_events")
+}
+
+model IntegrationCredential {
+  id              String                @id @default(cuid())
+  businessId      String
+  kind            IntegrationKind
+  encryptedPayload String              // Encrypted JSON with tokens/keys
+  lastRefresh     DateTime?
+  isActive        Boolean              @default(true)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, kind])
+  @@map("integration_credentials")
+}
+
+// Enums
+enum UserRole {
+  ADMIN
+  USER
+}
+
+enum BusinessRole {
+  OWNER
+  ADMIN
+  USER
+}
+
+enum InvoiceType {
+  TAX_INVOICE
+  INVOICE
+  QUOTE
+  RECEIPT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  VIEWED
+  PARTIAL_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  ONLINE
+  CHEQUE
+  OTHER
+}
+
+enum TrackingEventKind {
+  EMAIL_SENT
+  EMAIL_BOUNCE
+  EMAIL_OPEN
+  LINK_CLICK
+  WHATSAPP_SENT
+  WHATSAPP_DELIVERED
+  WHATSAPP_READ
+  WHATSAPP_FAILED
+  PAYMENT_RECEIVED
+  INVOICE_VIEWED
+}
+
+enum IntegrationKind {
+  GMAIL_OAUTH
+  SMTP
+  SENDGRID
+  WHATSAPP_CLOUD
+  WHATSAPP_TWILIO
+  STRIPE
+  LOCAL_PAYMENT_GATEWAY
+}

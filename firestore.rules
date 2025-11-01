@@ -1,0 +1,316 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================================================
+    // HELPER FUNCTIONS - Multi-Tenant RBAC
+    // ============================================================================
+
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Get active tenant ID from custom claims
+    function getActiveTenantId() {
+      return request.auth.token.activeTenantId;
+    }
+
+    // Get user's tenant memberships
+    function getTenantMemberships() {
+      return request.auth.token.tenantMemberships;
+    }
+
+    // Check if user is member of a specific tenant
+    function isTenantMember(tenantId) {
+      return isAuthenticated() &&
+             tenantId in getTenantMemberships();
+    }
+
+    // Get user's role for a specific tenant
+    function getTenantRole(tenantId) {
+      return isTenantMember(tenantId)
+        ? getTenantMemberships()[tenantId].role
+        : null;
+    }
+
+    // Get user's permissions for a specific tenant
+    function getTenantPermissions(tenantId) {
+      return isTenantMember(tenantId)
+        ? getTenantMemberships()[tenantId].permissions
+        : [];
+    }
+
+    // Check if user has a specific role
+    function hasRole(tenantId, role) {
+      return getTenantRole(tenantId) == role;
+    }
+
+    // Check if user is owner
+    function isOwner(tenantId) {
+      return hasRole(tenantId, 'owner');
+    }
+
+    // Check if user is admin or owner
+    function isAdmin(tenantId) {
+      let role = getTenantRole(tenantId);
+      return role == 'owner' || role == 'admin';
+    }
+
+    // Check if user has a specific permission
+    function hasPermission(tenantId, permission) {
+      let permissions = getTenantPermissions(tenantId);
+      return isOwner(tenantId) || // Owner has all permissions
+             permission in permissions ||
+             (permission.split(':')[0] + ':*') in permissions || // Wildcard permission
+             '*' in permissions; // Super permission
+    }
+
+    // Validate tenant ID matches active tenant (prevents cross-tenant writes)
+    function isActiveTenant(tenantId) {
+      return tenantId == getActiveTenantId();
+    }
+
+    // Check if data has not changed (for updates)
+    function unchangedField(field) {
+      return request.resource.data[field] == resource.data[field];
+    }
+
+    // ============================================================================
+    // USERS COLLECTION
+    // ============================================================================
+    match /users/{userId} {
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isAuthenticated() && request.auth.uid == userId;
+      allow delete: if false; // Users cannot be deleted directly
+    }
+
+    // ============================================================================
+    // TENANTS COLLECTION
+    // ============================================================================
+    match /tenants/{tenantId} {
+      allow read: if isTenantMember(tenantId);
+
+      allow create: if isAuthenticated() &&
+                      isActiveTenant(request.resource.data.id);
+
+      allow update: if isTenantMember(tenantId) &&
+                      isActiveTenant(tenantId) &&
+                      hasPermission(tenantId, 'tenants:update') &&
+                      unchangedField('id') &&
+                      unchangedField('createdAt');
+
+      allow delete: if isOwner(tenantId); // Only owner can delete tenant
+    }
+
+    // ============================================================================
+    // TENANT USERS (Membership) COLLECTION
+    // ============================================================================
+    match /tenantUsers/{tenantUserId} {
+      allow read: if isTenantMember(resource.data.tenantId);
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'users:manage');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'users:manage') &&
+                      unchangedField('tenantId') &&
+                      unchangedField('userId');
+
+      allow delete: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'users:manage');
+    }
+
+    // ============================================================================
+    // CLIENTS COLLECTION
+    // ============================================================================
+    match /clients/{clientId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'clients:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      isActiveTenant(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'clients:create');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      isActiveTenant(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'clients:update') &&
+                      unchangedField('tenantId');
+
+      allow delete: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'clients:delete');
+    }
+
+    // ============================================================================
+    // PRODUCTS COLLECTION
+    // ============================================================================
+    match /products/{productId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'products:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      isActiveTenant(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'products:create');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      isActiveTenant(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'products:update') &&
+                      unchangedField('tenantId');
+
+      allow delete: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'products:delete');
+    }
+
+    // ============================================================================
+    // INVOICES COLLECTION
+    // ============================================================================
+    match /invoices/{invoiceId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'invoices:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      isActiveTenant(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'invoices:create');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      isActiveTenant(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'invoices:update') &&
+                      unchangedField('tenantId') &&
+                      unchangedField('createdAt') &&
+                      unchangedField('createdBy');
+
+      allow delete: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'invoices:delete');
+    }
+
+    // ============================================================================
+    // PAYMENTS COLLECTION
+    // ============================================================================
+    match /payments/{paymentId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'payments:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      isActiveTenant(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'payments:create');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      isAdmin(resource.data.tenantId) &&
+                      unchangedField('tenantId');
+
+      allow delete: if isOwner(resource.data.tenantId); // Only owner can delete payments
+    }
+
+    // ============================================================================
+    // INVOICE EVENTS COLLECTION (Audit Trail)
+    // ============================================================================
+    match /invoiceEvents/{eventId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'invoices:read');
+
+      allow create: if true; // Allow tracking pixels/webhooks to create events
+
+      allow update, delete: if false; // Events are immutable
+    }
+
+    // ============================================================================
+    // COMMUNICATION LOGS COLLECTION
+    // ============================================================================
+    match /communicationLogs/{logId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'invoices:read');
+
+      allow create: if true; // Allow webhooks to create logs
+
+      allow update, delete: if false; // Logs are immutable
+    }
+
+    // ============================================================================
+    // INTEGRATIONS COLLECTION (Sensitive)
+    // ============================================================================
+    match /integrations/{integrationId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'settings:read');
+
+      allow create, update: if isTenantMember(request.resource.data.tenantId) &&
+                              hasPermission(request.resource.data.tenantId, 'settings:update') &&
+                              unchangedField('tenantId');
+
+      allow delete: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'settings:update');
+    }
+
+    // ============================================================================
+    // AUDIT LOGS COLLECTION
+    // ============================================================================
+    match /auditLogs/{logId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    isAdmin(resource.data.tenantId);
+
+      allow create: if true; // Backend functions create audit logs
+
+      allow update, delete: if false; // Audit logs are immutable
+    }
+
+    // ============================================================================
+    // RECURRING INVOICES COLLECTION
+    // ============================================================================
+    match /recurringInvoices/{recurringId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'invoices:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      isActiveTenant(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'invoices:create');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      isActiveTenant(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'invoices:update') &&
+                      unchangedField('tenantId');
+
+      allow delete: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'invoices:delete');
+    }
+
+    // ============================================================================
+    // SVAT VOUCHERS COLLECTION (Sri Lankan SVAT tracking)
+    // ============================================================================
+    match /svatVouchers/{voucherId} {
+      allow read: if isTenantMember(resource.data.tenantId) &&
+                    hasPermission(resource.data.tenantId, 'invoices:read');
+
+      allow create: if isAuthenticated() &&
+                      isTenantMember(request.resource.data.tenantId) &&
+                      isActiveTenant(request.resource.data.tenantId) &&
+                      hasPermission(request.resource.data.tenantId, 'invoices:create');
+
+      allow update: if isTenantMember(resource.data.tenantId) &&
+                      hasPermission(resource.data.tenantId, 'invoices:update') &&
+                      unchangedField('tenantId');
+
+      allow delete: if isAdmin(resource.data.tenantId);
+    }
+
+    // ============================================================================
+    // PUBLIC INVOICE VIEW (for public invoice links)
+    // ============================================================================
+    match /publicInvoices/{invoiceId} {
+      allow read: if true; // Public read for invoice viewing links
+      allow write: if false; // Only backend can create public invoice views
+    }
+
+    // ============================================================================
+    // DEFAULT DENY ALL
+    // ============================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
